@@ -1,155 +1,165 @@
 # DAX Builder
 
-AI-powered DAX measure generator for Power BI.
-Describe what you need in plain German or English – the app generates the DAX code and explains it.
+AI-gestützter DAX Measure Generator für Power BI. Beschreibe ein Measure in natürlicher Sprache – der AI schreibt den DAX-Code.
 
----
+<!-- Screenshot Platzhalter – ersetze mit echtem Screenshot nach erstem Deployment -->
+<!-- ![DAX Builder Screenshot](docs/screenshot.png) -->
 
 ## Features
 
-- Natural-language → DAX measure generation
-- Privacy-first: real table/column names are **anonymized** before sending to the AI
-- Multi-provider: switch between **Anthropic Claude**, **Azure OpenAI**, and local **Ollama** with a single `.env` change
-- Conversation history: previous measures stay in context so the AI can build on them
-- One-click clipboard copy for every generated measure
-- Sidebar model overview: tables, columns, measures, relationships
+- **Demo-Modus** – sofort nutzbar ohne eigenes Modell (Dummy-Finanzdaten)
+- **ZIP-Upload** – eigene Power BI TMDL Definition hochladen
+- **Anonymisierung** – echte Tabellen-/Spaltennamen werden vor dem AI-Aufruf ersetzt
+- **Multi-Turn** – Kontext über mehrere Anfragen hinweg erhalten
+- **Multi-Provider** – Anthropic Claude, Azure OpenAI oder lokales Ollama
 
 ---
 
-## Installation
+## Lokale Installation
 
-### 1. Prerequisites
+### Voraussetzungen
 
-- Python 3.11 or newer
-- pip
+- Python 3.11 oder neuer ([python.org](https://www.python.org/downloads/))
+- Ein Anthropic API Key ([console.anthropic.com](https://console.anthropic.com))
 
-### 2. Clone / download
+### Schritte
 
 ```bash
-git clone <your-repo-url>
+# 1. Repository klonen
+git clone https://github.com/DEIN-BENUTZERNAME/dax-builder.git
 cd dax-builder
-```
 
-### 3. Create a virtual environment (recommended)
+# 2. Virtuelle Umgebung erstellen
+python -m venv .venv
 
-```bash
-python -m venv venv
 # Windows
-venv\Scripts\activate
+.venv\Scripts\activate
 # macOS / Linux
-source venv/bin/activate
-```
+source .venv/bin/activate
 
-### 4. Install dependencies
-
-```bash
+# 3. Abhängigkeiten installieren
 pip install -r requirements.txt
-```
 
-### 5. Configure the AI provider
+# 4. API Key setzen (.env Datei erstellen)
+# Windows
+echo ANTHROPIC_API_KEY=sk-ant-... > .env
+# macOS / Linux
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
 
-Copy (or edit) `.env` and fill in your credentials:
-
-```bash
-# For Anthropic Claude (default)
-ANTHROPIC_API_KEY=sk-ant-...
-AI_PROVIDER=anthropic
-AI_MODEL=claude-sonnet-4-5
-```
-
-Get an Anthropic API key at: <https://console.anthropic.com/>
-
-### 6. Generate the mapping file
-
-```bash
-# Generates a dummy mapping.json for the sample financial model
-python mapping_generator.py
-
-# Or from a real Power BI model.bim file
-python mapping_generator.py --source path/to/model.bim
-```
-
-> **Note:** `mapping.json` is excluded from git (`.gitignore`) because it may contain business-sensitive schema information.
-
-### 7. Start the app
-
-```bash
+# 5. App starten
 streamlit run dax_builder.py
 ```
 
-The browser opens automatically at `http://localhost:8501`.
+Die App öffnet sich automatisch unter `http://localhost:8501`.
+
+### Optionale .env Einstellungen
+
+```env
+# AI Provider (anthropic | azure | ollama)
+AI_PROVIDER=anthropic
+
+# Modell
+AI_MODEL=claude-sonnet-4-5
+
+# Nur für Azure OpenAI:
+AZURE_OPENAI_ENDPOINT=https://...
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_API_VERSION=2024-02-01
+
+# Nur für Ollama:
+OLLAMA_BASE_URL=http://localhost:11434
+```
 
 ---
 
-## Switching AI Providers
+## Power BI Modell hochladen
 
-Edit `.env` – no code changes required:
+1. In Power BI Desktop: **File → Save As → Power BI Project (.pbip)**
+2. Im Projektordner befindet sich ein `definition/` Ordner
+3. Diesen Ordner als ZIP packen (z.B. `definition.zip`)
+4. In der App unter **Setup** hochladen
 
-| Provider | Settings |
-|----------|----------|
+Erwartete ZIP-Struktur:
+```
+definition.zip
+└── definition/
+    ├── model.tmdl
+    ├── relationships.tmdl
+    └── tables/
+        ├── Umsatz.tmdl
+        ├── Kalender.tmdl
+        └── ...
+```
+
+---
+
+## Deployment auf Streamlit Cloud
+
+### Schritte
+
+1. **Repository auf GitHub pushen**
+   ```bash
+   git add .
+   git commit -m "Initial DAX Builder"
+   git push origin main
+   ```
+
+2. **App anlegen auf [share.streamlit.io](https://share.streamlit.io)**
+   - *New app* → GitHub Repository auswählen
+   - Main file: `dax_builder.py`
+   - *Deploy*
+
+3. **API Key als Secret hinterlegen**
+   - In der App-Übersicht: **Settings → Secrets**
+   - Einfügen:
+     ```toml
+     ANTHROPIC_API_KEY = "sk-ant-..."
+     ```
+   - *Save* → App startet neu
+
+Die App ist dann erreichbar unter `https://DEIN-NAME-dax-builder.streamlit.app`.
+
+> Kein `.env` File nötig – Streamlit Cloud injiziert die Secrets automatisch als Umgebungsvariablen.
+
+---
+
+## Projektstruktur
+
+```
+dax_builder.py        # Streamlit App (Haupteinstiegspunkt)
+mapping_generator.py  # Liest PBIP/TMDL Modell, erzeugt Mapping
+anonymizer.py         # Anonymisiert Prompts, de-anonymisiert Antworten
+ai_client.py          # AI-Provider Abstraktion (Anthropic / Azure / Ollama)
+requirements.txt      # Python-Abhängigkeiten
+.gitignore            # Schließt .env, mapping.json und temp-Ordner aus
+```
+
+---
+
+## Wie Anonymisierung funktioniert
+
+Vor dem AI-Aufruf:
+1. `anonymizer.py` ersetzt echte Namen (`Finanzdaten` → `Table_A`, `Betrag_netto` → `Col_A2` …)
+2. Der anonymisierte Prompt geht an die AI
+3. Die Antwort (mit Aliasen) kommt zurück
+4. Aliase werden vor der Anzeige wieder ersetzt
+
+Dein echtes Datenschema verlässt die Umgebung nie im Klartext.
+
+---
+
+## AI Provider wechseln
+
+Einstellung in `.env` (lokal) oder Streamlit Secrets (Cloud):
+
+| Provider | Einstellung |
+|----------|-------------|
 | Anthropic Claude | `AI_PROVIDER=anthropic`, `ANTHROPIC_API_KEY=...` |
 | Azure OpenAI | `AI_PROVIDER=azure`, `AZURE_OPENAI_ENDPOINT=...`, `AZURE_OPENAI_API_KEY=...` |
-| Ollama (local) | `AI_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://localhost:11434`, `AI_MODEL=llama3` |
+| Ollama (lokal) | `AI_PROVIDER=ollama`, `OLLAMA_BASE_URL=http://localhost:11434`, `AI_MODEL=llama3` |
 
 ---
 
-## Project Structure
-
-```
-dax-builder/
-├── dax_builder.py          # Streamlit web app (main entry point)
-├── mapping_generator.py    # Generates mapping.json from model.bim or dummy data
-├── anonymizer.py           # Anonymizes prompts, deanonymizes responses
-├── ai_client.py            # Multi-provider AI abstraction layer
-├── requirements.txt
-├── .env                    # API keys & provider config (not in git)
-├── mapping.json            # Generated schema mapping (not in git)
-├── .gitignore
-└── README.md
-```
-
----
-
-## Usage Example
-
-1. Open the app in your browser
-2. Enter a description like:
-   *"Berechne den Nettoumsatz für das aktuelle Geschäftsjahr, aufgeteilt nach Kostenstellen, nur für aktive Kostenstellen."*
-3. Click **DAX generieren**
-4. Copy the generated measure with **In Clipboard kopieren**
-5. Paste it directly into Power BI Desktop
-
----
-
-## How Anonymization Works
-
-Before sending your request to the AI:
-
-1. `anonymizer.py` replaces real names (`Finanzdaten` → `Table_A`, `Betrag_netto` → `Col_A2`, …)
-2. The anonymized prompt is sent to the AI
-3. The response (with aliases) is received back
-4. Aliases are replaced with real names before display
-
-This means your real business schema never leaves your network (beyond the AI API call),
-and even the AI sees only generic placeholder names.
-
----
-
-## Smoke Tests
-
-```bash
-# Test mapping generation
-python mapping_generator.py
-
-# Test anonymizer
-python anonymizer.py
-
-# Test AI client
-python ai_client.py
-```
-
----
-
-## License
+## Lizenz
 
 MIT

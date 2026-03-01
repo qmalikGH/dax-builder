@@ -50,7 +50,11 @@ class AnthropicClient(BaseAIClient):
 
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY not set in .env")
+            raise ValueError(
+                "ANTHROPIC_API_KEY is not set. "
+                "Set it as an environment variable, in a .env file (local), "
+                "or in Streamlit Cloud under Settings → Secrets."
+            )
 
         self._client = _anthropic.Anthropic(api_key=api_key)
         self._model  = AI_MODEL

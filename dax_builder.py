@@ -5,16 +5,24 @@ Streamlit web application for AI-powered DAX measure generation.
 
 Run with:
     streamlit run dax_builder.py
+
+Modes:
+    Demo   – uses the built-in dummy financial model (no upload required)
+    Upload – user uploads a definition.zip (PBIP TMDL export)
 """
 
-import re
+import io
 import json
-import streamlit as st
+import re
+import tempfile
+import zipfile
 from pathlib import Path
 
-from mapping_generator import generate_dummy_mapping
-from anonymizer import load_mapping, anonymize, deanonymize, build_system_prompt
+import streamlit as st
+
+from anonymizer import build_system_prompt
 from ai_client import get_client, AI_PROVIDER, AI_MODEL
+from mapping_generator import generate_dummy_mapping, generate_mapping_from_tmdl
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +44,6 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Sidebar header */
     .sidebar-section-header {
         font-size: 0.75rem;
         font-weight: 700;
@@ -46,25 +53,15 @@ st.markdown(
         margin-top: 1rem;
         margin-bottom: 0.25rem;
     }
-    /* Measure pill */
-    .measure-pill {
+    .demo-badge {
         display: inline-block;
-        background: #1f4e79;
-        color: white;
+        background: #7a4f00;
+        color: #ffd580;
         border-radius: 4px;
-        padding: 2px 8px;
-        font-size: 0.78rem;
-        margin: 2px;
+        padding: 2px 10px;
+        font-size: 0.75rem;
+        font-weight: 600;
     }
-    /* History card */
-    .history-card {
-        background: #1e1e2e;
-        border-left: 3px solid #4e8cff;
-        border-radius: 4px;
-        padding: 0.75rem 1rem;
-        margin-bottom: 0.75rem;
-    }
-    /* Provider badge */
     .provider-badge {
         background: #0e3460;
         color: #7ec8e3;
@@ -87,8 +84,9 @@ def _init_state():
     defaults = {
         "mapping":          None,
         "system_prompt":    None,
-        "conversation":     [],   # list of {"role": str, "content": str}
-        "history":          [],   # list of {"description": str, "dax": str, "explanation": str}
+        "demo_mode":        True,
+        "conversation":     [],
+        "history":          [],
         "last_dax":         "",
         "last_explanation": "",
         "last_description": "",
@@ -100,84 +98,102 @@ def _init_state():
 
 _init_state()
 
-
-# ---------------------------------------------------------------------------
-# Load / generate mapping
-# ---------------------------------------------------------------------------
-
-@st.cache_resource(show_spinner="Lade Datenmodell...")
-def _load_mapping_cached():
-    if Path("mapping.json").exists():
-        return load_mapping()
-    # Generate and persist dummy mapping
-    m = generate_dummy_mapping()
-    Path("mapping.json").write_text(
-        json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    return m
-
-mapping = _load_mapping_cached()
+# Default: load dummy mapping on first run
 if st.session_state["mapping"] is None:
-    st.session_state["mapping"]       = mapping
-    st.session_state["system_prompt"] = build_system_prompt(mapping)
+    dummy = generate_dummy_mapping()
+    st.session_state["mapping"]       = dummy
+    st.session_state["system_prompt"] = build_system_prompt(dummy)
+    st.session_state["demo_mode"]     = True
 
 
 # ---------------------------------------------------------------------------
-# Helper: extract DAX and explanation from AI response
+# Helper: process uploaded ZIP → mapping dict
+# ---------------------------------------------------------------------------
+
+def _process_zip(uploaded_file) -> dict:
+    """
+    Extract a definition.zip and generate a mapping dict from the TMDL folder.
+    The temp directory is cleaned up automatically after extraction.
+    """
+    zip_bytes = uploaded_file.read()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            zf.extractall(tmp_path)
+
+        # Locate the definition/ folder (may be at root or one level deep)
+        definition_dir: Path | None = None
+        for candidate in sorted(tmp_path.rglob("definition")):
+            if candidate.is_dir() and (candidate / "tables").is_dir():
+                definition_dir = candidate
+                break
+
+        if definition_dir is None:
+            raise ValueError(
+                "Kein 'definition/' Ordner mit 'tables/' Unterordner in der ZIP gefunden.\n"
+                "Erwartete Struktur: definition/tables/*.tmdl"
+            )
+
+        return generate_mapping_from_tmdl(str(definition_dir))
+
+
+# ---------------------------------------------------------------------------
+# Helper: parse AI response
 # ---------------------------------------------------------------------------
 
 def _parse_response(raw: str) -> tuple[str, str]:
-    """
-    Extract DAX code block and explanation from the AI response.
-    Returns (dax_code, explanation).
-    """
-    # Try to find ```dax ... ``` block
     dax_match = re.search(r"```(?:dax|DAX)\s*(.*?)```", raw, re.DOTALL)
     dax = dax_match.group(1).strip() if dax_match else ""
 
-    # Explanation: everything after the code block, or full text if no block
     if dax_match:
         explanation = raw[dax_match.end():].strip()
-        # Remove leading section headers
         explanation = re.sub(r"^\s*#+\s*EXPLANATION\s*", "", explanation, flags=re.IGNORECASE).strip()
-        # Also remove ** bold headers
         explanation = re.sub(r"^\s*\*\*EXPLANATION\*\*\s*", "", explanation, flags=re.IGNORECASE).strip()
     else:
         explanation = raw.strip()
         dax = ""
 
-    if not explanation:
-        # Fallback: take text before the code block
-        explanation = raw[: dax_match.start()].strip() if dax_match else raw.strip()
+    if not explanation and dax_match:
+        explanation = raw[: dax_match.start()].strip()
 
     return dax, explanation
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: model overview
+# Sidebar
 # ---------------------------------------------------------------------------
+
+mapping = st.session_state["mapping"]
 
 with st.sidebar:
     st.title("📊 DAX Builder")
-    st.markdown(
-        f'<span class="provider-badge">{AI_PROVIDER} · {AI_MODEL}</span>',
-        unsafe_allow_html=True,
-    )
+
+    col_a, col_b = st.columns([3, 2])
+    with col_a:
+        st.markdown(
+            f'<span class="provider-badge">{AI_PROVIDER} · {AI_MODEL}</span>',
+            unsafe_allow_html=True,
+        )
+    with col_b:
+        if st.session_state["demo_mode"]:
+            st.markdown('<span class="demo-badge">Demo</span>', unsafe_allow_html=True)
+
     st.divider()
 
     # --- Tables ---
     st.markdown('<div class="sidebar-section-header">Tabellen</div>', unsafe_allow_html=True)
     for real_name, info in mapping.get("tables", {}).items():
-        t_type  = info.get("type", "")
-        icon    = "⭐" if t_type == "fact" else "📋"
+        t_type = info.get("type", "")
+        icon   = "⭐" if t_type == "fact" else "📋"
         with st.expander(f"{icon} {real_name}", expanded=False):
             cols = [
                 v for v in mapping.get("columns", {}).values()
                 if v["real_table"] == real_name
             ]
-            if cols:
-                for c in cols:
-                    st.markdown(f"  `{c['real_column']}`")
+            for c in cols:
+                st.markdown(f"  `{c['real_column']}`")
 
     # --- Measures ---
     st.markdown('<div class="sidebar-section-header">Measures</div>', unsafe_allow_html=True)
@@ -202,10 +218,9 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Clear history ---
     if st.button("Verlauf löschen", use_container_width=True):
-        st.session_state["conversation"] = []
-        st.session_state["history"]      = []
+        st.session_state["conversation"]     = []
+        st.session_state["history"]          = []
         st.session_state["last_dax"]         = ""
         st.session_state["last_explanation"] = ""
         st.session_state["last_description"] = ""
@@ -213,13 +228,95 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Main area
+# Setup section – ZIP upload (always visible at the top)
 # ---------------------------------------------------------------------------
 
-st.header("DAX Measure Generator")
-st.caption("Beschreibe das gewünschte Measure in natürlicher Sprache – der AI erledigt den Rest.")
+st.header("Datenmodell hochladen")
 
-# Input form
+if st.session_state["demo_mode"]:
+    st.info(
+        "**Demo-Modus aktiv** – Es wird ein Dummy-Datenmodell (fiktive Finanzdaten) verwendet.  \n"
+        "Lade dein eigenes TMDL Modell als ZIP hoch, um mit deinen echten Daten zu arbeiten."
+    )
+else:
+    t_loaded = len(st.session_state["mapping"].get("tables", {}))
+    m_loaded = len(st.session_state["mapping"].get("measures", {}))
+    st.success(
+        f"Eigenes Modell aktiv – {t_loaded} Tabellen, {m_loaded} Measures.  \n"
+        "Neues ZIP hochladen, um das Modell zu wechseln."
+    )
+
+st.markdown(
+    "**ZIP erstellen:** Power BI Desktop → *File → Save As → Power BI Project (.pbip)*"
+    " → `definition/` Ordner als ZIP packen."
+)
+
+uploaded_zip = st.file_uploader(
+    "Lade dein TMDL Modell als ZIP hoch",
+    type="zip",
+    help="Enthält den TMDL 'definition/' Ordner mit tables/*.tmdl und relationships.tmdl",
+    label_visibility="visible",
+)
+
+col1, col2 = st.columns([2, 3])
+with col1:
+    load_btn = st.button(
+        "Modell laden",
+        type="primary",
+        disabled=uploaded_zip is None,
+        use_container_width=True,
+    )
+with col2:
+    if not st.session_state["demo_mode"]:
+        if st.button("Zurück zum Demo-Modus", use_container_width=True):
+            dummy = generate_dummy_mapping()
+            st.session_state["mapping"]          = dummy
+            st.session_state["system_prompt"]    = build_system_prompt(dummy)
+            st.session_state["demo_mode"]        = True
+            st.session_state["conversation"]     = []
+            st.session_state["history"]          = []
+            st.session_state["last_dax"]         = ""
+            st.session_state["last_explanation"] = ""
+            st.session_state["last_description"] = ""
+            st.rerun()
+
+if load_btn and uploaded_zip is not None:
+    with st.spinner("ZIP wird entpackt und Modell analysiert..."):
+        try:
+            new_mapping = _process_zip(uploaded_zip)
+            st.session_state["mapping"]          = new_mapping
+            st.session_state["system_prompt"]    = build_system_prompt(new_mapping)
+            st.session_state["demo_mode"]        = False
+            st.session_state["conversation"]     = []
+            st.session_state["history"]          = []
+            st.session_state["last_dax"]         = ""
+            st.session_state["last_explanation"] = ""
+            st.session_state["last_description"] = ""
+            t_count = len(new_mapping.get("tables", {}))
+            m_count = len(new_mapping.get("measures", {}))
+            st.success(f"Modell geladen: {t_count} Tabellen, {m_count} Measures.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Fehler beim Laden der ZIP: {exc}")
+
+st.divider()
+
+
+# ---------------------------------------------------------------------------
+# Main area – DAX Generator
+# ---------------------------------------------------------------------------
+
+# Refresh mapping from session state (may have changed above)
+mapping = st.session_state["mapping"]
+
+st.header("DAX Measure Generator")
+if st.session_state["demo_mode"]:
+    st.caption("Demo-Modus · Dummy Datenmodell · Beschreibe das gewünschte Measure in natürlicher Sprache.")
+else:
+    st.caption("Beschreibe das gewünschte Measure in natürlicher Sprache – der AI erledigt den Rest.")
+
+from anonymizer import anonymize, deanonymize
+
 with st.form("dax_form", clear_on_submit=False):
     description = st.text_area(
         "Measure-Beschreibung",
@@ -233,8 +330,6 @@ with st.form("dax_form", clear_on_submit=False):
     col_btn1, col_btn2 = st.columns([1, 5])
     with col_btn1:
         submitted = st.form_submit_button("DAX generieren", type="primary", use_container_width=True)
-    with col_btn2:
-        st.empty()
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +342,6 @@ if submitted and description.strip():
 
     anon_description = anonymize(description.strip(), mapping)
 
-    # Build conversation history for context
     st.session_state["conversation"].append(
         {"role": "user", "content": anon_description}
     )
@@ -261,16 +355,12 @@ if submitted and description.strip():
             )
         except Exception as exc:
             st.error(f"AI-Fehler: {exc}")
-            st.session_state["conversation"].pop()  # revert
+            st.session_state["conversation"].pop()
             st.stop()
 
-    # Deanonymize
     raw_deanon = deanonymize(raw_response, mapping)
-
-    # Parse
     dax, explanation = _parse_response(raw_deanon)
 
-    # Store assistant reply in conversation (anonymized version for context)
     st.session_state["conversation"].append(
         {"role": "assistant", "content": raw_response}
     )
@@ -279,12 +369,14 @@ if submitted and description.strip():
     st.session_state["last_explanation"] = explanation
     st.session_state["generating"]       = False
 
-    # Save to history
     st.session_state["history"].insert(0, {
         "description": description.strip(),
         "dax":         dax,
         "explanation": explanation,
     })
+
+elif submitted and description.strip() == "":
+    st.warning("Bitte gib eine Beschreibung ein.")
 
 
 # ---------------------------------------------------------------------------
@@ -295,10 +387,8 @@ if st.session_state["last_dax"]:
     st.divider()
     st.subheader("Generierter DAX-Code")
 
-    # DAX with syntax highlighting
     st.code(st.session_state["last_dax"], language="sql")
 
-    # Clipboard copy button (Streamlit workaround via JS)
     dax_escaped = st.session_state["last_dax"].replace("`", "\\`").replace("\\", "\\\\")
     clipboard_html = f"""
     <button onclick="navigator.clipboard.writeText(`{dax_escaped}`).then(()=>{{
@@ -314,13 +404,9 @@ if st.session_state["last_dax"]:
     """
     st.components.v1.html(clipboard_html, height=45)
 
-    # Explanation
     if st.session_state["last_explanation"]:
         with st.expander("Erklärung", expanded=True):
             st.markdown(st.session_state["last_explanation"])
-
-elif submitted and description.strip() == "":
-    st.warning("Bitte gib eine Beschreibung ein.")
 
 
 # ---------------------------------------------------------------------------
@@ -332,10 +418,10 @@ if len(st.session_state["history"]) > 1:
     st.subheader("Vorherige Measures")
 
     for i, entry in enumerate(st.session_state["history"][1:], start=1):
-        with st.expander(f"#{i} — {entry['description'][:80]}{'…' if len(entry['description'])>80 else ''}", expanded=False):
+        label = f"#{i} — {entry['description'][:80]}{'…' if len(entry['description']) > 80 else ''}"
+        with st.expander(label, expanded=False):
             st.code(entry["dax"], language="sql")
 
-            # Small copy button for history items
             dax_esc = entry["dax"].replace("`", "\\`").replace("\\", "\\\\")
             btn_html = f"""
             <button onclick="navigator.clipboard.writeText(`{dax_esc}`).then(()=>{{

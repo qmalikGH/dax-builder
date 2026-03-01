@@ -2,6 +2,12 @@
 .env
 mapping.json
 
+# Temp folders created by ZIP upload
+tmp/
+tmp_*/
+temp/
+temp_*/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,8 +1,8 @@
 # Core
 streamlit>=1.35.0
-python-dotenv>=1.0.0
+python-dotenv>=1.0.0   # optional locally; Streamlit Cloud uses Secrets instead
 
 # AI providers (install only what you need)
-anthropic>=0.28.0          # for AI_PROVIDER=anthropic
-openai>=1.30.0             # for AI_PROVIDER=azure
-requests>=2.31.0           # for AI_PROVIDER=ollama (also used by other libs)
+anthropic>=0.28.0      # for AI_PROVIDER=anthropic (default)
+openai>=1.30.0         # for AI_PROVIDER=azure
+requests>=2.31.0       # for AI_PROVIDER=ollama
