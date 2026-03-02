@@ -20,7 +20,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from anonymizer import build_system_prompt
+from anonymizer import build_system_prompt, anonymize, deanonymize
 from ai_client import get_client, AI_PROVIDER, AI_MODEL
 from mapping_generator import generate_dummy_mapping, generate_mapping_from_tmdl
 
@@ -91,6 +91,7 @@ def _init_state():
         "last_explanation": "",
         "last_description": "",
         "generating":       False,
+        "std_results":      [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -315,7 +316,169 @@ if st.session_state["demo_mode"]:
 else:
     st.caption("Beschreibe das gewünschte Measure in natürlicher Sprache – der AI erledigt den Rest.")
 
-from anonymizer import anonymize, deanonymize
+# ---------------------------------------------------------------------------
+# Standard-Measures definitions
+# ---------------------------------------------------------------------------
+
+STANDARD_MEASURES = [
+    {
+        "key":     "ytd",
+        "label":   "YTD (Jahr bis heute)",
+        "default": True,
+        "prompt": (
+            "Erstelle ein DAX-Measure für den kumulierten Umsatz vom Beginn des "
+            "Geschäftsjahres bis zur aktuellen Periode (YTD = Year-to-Date). "
+            "Nutze TOTALYTD oder DATESYTD und berücksichtige das konfigurierte Geschäftsjahr."
+        ),
+    },
+    {
+        "key":     "py",
+        "label":   "Vorjahr (gleiche Periode letztes Jahr)",
+        "default": True,
+        "prompt": (
+            "Erstelle ein DAX-Measure für den Umsatz der gleichen kumulierten Periode "
+            "im Vorjahr (Prior Year – SPLY). Berücksichtige das konfigurierte Geschäftsjahr. "
+            "Nutze SAMEPERIODLASTYEAR oder DATEADD."
+        ),
+    },
+    {
+        "key":     "ytd_vs_py_abs",
+        "label":   "YTD vs Vorjahr (Abweichung absolut)",
+        "default": True,
+        "prompt": (
+            "Erstelle ein DAX-Measure für die absolute Abweichung des aktuellen "
+            "Geschäftsjahres-YTD-Umsatzes gegenüber dem Vorjahres-YTD-Umsatz "
+            "(Differenz: aktuelles YTD minus Vorjahres-YTD)."
+        ),
+    },
+    {
+        "key":     "ytd_vs_py_pct",
+        "label":   "YTD vs Vorjahr % (Abweichung prozentual)",
+        "default": True,
+        "prompt": (
+            "Erstelle ein DAX-Measure für die prozentuale Veränderung des "
+            "Geschäftsjahres-YTD-Umsatzes gegenüber dem Vorjahres-YTD. "
+            "Nutze DIVIDE für sichere Division durch Null. Ergebnis als Dezimalzahl (0.12 = 12%)."
+        ),
+    },
+    {
+        "key":     "budget_vs_actual",
+        "label":   "Budget vs Actual (Plan/Ist Vergleich)",
+        "default": False,
+        "prompt": (
+            "Erstelle ein DAX-Measure für den Plan/Ist-Vergleich: Actual (Kosten oder Umsatz) "
+            "minus Budget-Measure. Nutze die vorhandenen Measures im Modell. "
+            "Berechne die absolute Abweichung und nutze DIVIDE für die prozentuale Abweichung."
+        ),
+    },
+    {
+        "key":     "rolling_12",
+        "label":   "Rolling 12 Months (letzte 12 Monate)",
+        "default": False,
+        "prompt": (
+            "Erstelle ein DAX-Measure für den rollierenden 12-Monats-Umsatz "
+            "(gleitende Summe der letzten 12 Monate bis zur aktuellen Periode). "
+            "Nutze DATESINPERIOD mit LASTDATE und -12 als Versatz in Monaten."
+        ),
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Standard-Measures UI (above normal input form)
+# ---------------------------------------------------------------------------
+
+st.subheader("📦 Standard-Measures")
+
+_cb_col1, _cb_col2 = st.columns(2)
+_selected_std: list[dict] = []
+for _i, _m in enumerate(STANDARD_MEASURES):
+    _col = _cb_col1 if _i % 2 == 0 else _cb_col2
+    with _col:
+        _checked = st.checkbox(
+            _m["label"],
+            value=_m["default"],
+            key=f"std_cb_{_m['key']}",
+        )
+        if _checked:
+            _selected_std.append(_m)
+
+_gen_std_btn = st.button(
+    "Ausgewählte Measures generieren",
+    type="primary",
+    key="gen_std_btn",
+)
+
+if _gen_std_btn:
+    if not _selected_std:
+        st.warning("Bitte mindestens ein Measure auswählen.")
+    else:
+        _std_results: list[dict] = []
+        _progress_bar = st.progress(0.0, text="Starte Generierung…")
+        for _idx, _measure in enumerate(_selected_std):
+            _progress_bar.progress(
+                _idx / len(_selected_std),
+                text=f"Generiere '{_measure['label']}' ({_idx + 1}/{len(_selected_std)})…",
+            )
+            with st.spinner(f"Generiere '{_measure['label']}'…"):
+                _anon_prompt = anonymize(_measure["prompt"], mapping)
+                try:
+                    _client = get_client()
+                    _raw = _client.chat(
+                        messages=[{"role": "user", "content": _anon_prompt}],
+                        system_prompt=st.session_state["system_prompt"],
+                    )
+                    _raw_deanon = deanonymize(_raw, mapping)
+                    _dax, _expl = _parse_response(_raw_deanon)
+                    _std_results.append({
+                        "name":        _measure["label"],
+                        "dax":         _dax,
+                        "explanation": _expl,
+                        "error":       None,
+                    })
+                except Exception as _exc:
+                    _std_results.append({
+                        "name":        _measure["label"],
+                        "dax":         "",
+                        "explanation": "",
+                        "error":       str(_exc),
+                    })
+        _progress_bar.progress(1.0, text="Fertig!")
+        _progress_bar.empty()
+        st.session_state["std_results"] = _std_results
+
+if st.session_state["std_results"]:
+    st.markdown("#### Generierte Standard-Measures")
+    for _result in st.session_state["std_results"]:
+        with st.expander(f"**{_result['name']}**", expanded=True):
+            if _result["error"]:
+                st.error(f"Fehler: {_result['error']}")
+            else:
+                st.code(_result["dax"], language="sql")
+                _dax_esc = _result["dax"].replace("`", "\\`").replace("\\", "\\\\")
+                _btn_html = f"""
+                <button onclick="navigator.clipboard.writeText(`{_dax_esc}`).then(()=>{{
+                    this.innerText='✓ Kopiert!';
+                    setTimeout(()=>this.innerText='Kopieren', 2000);
+                }})"
+                style="
+                    background:#1f4e79; color:white; border:none; border-radius:5px;
+                    padding:4px 14px; cursor:pointer; font-size:0.82rem; margin-bottom:8px;
+                ">
+                Kopieren
+                </button>
+                """
+                st.components.v1.html(_btn_html, height=38)
+                if _result["explanation"]:
+                    st.markdown(_result["explanation"])
+
+st.markdown(
+    "<div style='text-align:center; color:#888; font-size:0.9rem; "
+    "margin:1.5rem 0; letter-spacing:0.05em;'>"
+    "─── oder eigenes Measure beschreiben ───</div>",
+    unsafe_allow_html=True,
+)
+
 
 with st.form("dax_form", clear_on_submit=False):
     description = st.text_area(
